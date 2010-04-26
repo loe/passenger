@@ -30,6 +30,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <grp.h>
 #ifdef __OpenBSD__
 	// OpenBSD needs this for 'struct iovec'. Apparently it isn't
 	// always included by unistd.h and sys/types.h.
@@ -158,10 +159,14 @@ recv_fd(VALUE self, VALUE socket_fd) {
 	}
 	
 	control_header = CMSG_FIRSTHDR(&msg);
+	if (control_header == NULL) {
+		rb_raise(rb_eIOError, "No valid file descriptor received.");
+		return Qnil;
+	}
 	if (control_header->cmsg_len   != EXPECTED_CMSG_LEN
 	 || control_header->cmsg_level != SOL_SOCKET
 	 || control_header->cmsg_type  != SCM_RIGHTS) {
-		rb_sys_fail("No valid file descriptor received.");
+		rb_raise(rb_eIOError, "No valid file descriptor received.");
 		return Qnil;
 	}
 	#if defined(__APPLE__) || defined(__SOLARIS__) || defined(__arm__)
@@ -282,6 +287,29 @@ disable_stdio_buffering() {
 	return Qnil;
 }
 
+/**
+ * Ruby's implementations of initgroups, setgid and setuid are broken various ways,
+ * sigh...
+ * Ruby's setgid and setuid can't handle negative UIDs and initgroups is just broken.
+ * Work around it by using our own implementation.
+ */
+static VALUE
+switch_user(VALUE self, VALUE username, VALUE uid, VALUE gid) {
+	uid_t the_uid = NUM2LL(uid);
+	gid_t the_gid = NUM2LL(gid);
+
+	if (initgroups(RSTRING_PTR(username), the_gid) == -1) {
+		rb_sys_fail("initgroups");
+	}
+	if (setgid(the_gid) == -1) {
+		rb_sys_fail("setgid");
+	}
+	if (setuid(the_uid) == -1) {
+		rb_sys_fail("setuid");
+	}
+	return Qnil;
+}
+
 /***************************/
 
 void
@@ -302,6 +330,7 @@ Init_native_support() {
 	rb_define_singleton_method(mNativeSupport, "accept", f_accept, 1);
 	rb_define_singleton_method(mNativeSupport, "close_all_file_descriptors", close_all_file_descriptors, 1);
 	rb_define_singleton_method(mNativeSupport, "disable_stdio_buffering", disable_stdio_buffering, 0);
+	rb_define_singleton_method(mNativeSupport, "switch_user", switch_user, 3);
 	
 	/* The maximum length of a Unix socket path, including terminating null. */
 	rb_define_const(mNativeSupport, "UNIX_PATH_MAX", INT2NUM(sizeof(addr.sun_path)));
